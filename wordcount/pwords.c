@@ -32,6 +32,24 @@
 #include "word_count.h"
 #include "word_helpers.h"
 
+struct thread_args {
+    char *filename;
+    word_count_list_t *wclist;
+};
+
+/* thread function to process one file */
+void *process_file(void *args) {
+    struct thread_args *ta = (struct thread_args *)args; // cast argument back to thread_args
+    FILE *fp = fopen(ta->filename, "r");
+    if (fp == NULL) {
+        perror("Could not open file");
+        return NULL;
+    }
+    count_words(ta->wclist, fp);
+    fclose(fp);
+    return NULL;
+}
+
 /*
  * main - handle command line, spawning one thread per file.
  */
@@ -44,7 +62,27 @@ int main(int argc, char *argv[]) {
         /* Process stdin in a single thread. */
         count_words(&word_counts, stdin);
     } else {
-        /* TODO */
+        int num_threads = argc - 1;
+        pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
+        struct thread_args *args = malloc(num_threads * sizeof(struct thread_args));
+        
+        // create threads to process each file
+        for (int i = 0; i < num_threads; i++) {
+            args[i].filename = argv[i + 1];
+            args[i].wclist = &word_counts; // pass pointer to shared word count list
+            
+            if (pthread_create(&threads[i], NULL, process_file, &args[i]) != 0) {
+                perror("ERROR creating thread");
+                exit(1);
+            }
+        }
+        
+        // wait for all threads to complete
+        for (int i = 0; i < num_threads; i++)
+            pthread_join(threads[i], NULL);
+
+        free(args);
+        free(threads);
     }
 
     /* Output final result of all threads' work. */
