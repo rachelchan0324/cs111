@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "word_count.h"
 #include "word_helpers.h"
@@ -61,8 +62,68 @@ int main(int argc, char *argv[]) {
     if (argc <= 1) {
         /* Process stdin in a single process. */
         count_words(&word_counts, stdin);
-    } else {
-        /* TODO */
+    } 
+    else {
+        for (int i = 1; i < argc; i++) {
+            // create a pipe for communication between parent and child.
+            // pipefd[0] is the read end, pipefd[1] is the write end.
+            // the child will write word counts to the pipe, and the parent will read them back
+
+            // each child gets its own pipe
+            int pipefd[2];
+            if (pipe(pipefd) == -1) {
+                perror("pipe");
+                exit(EXIT_FAILURE);
+            }
+            
+            // fork a new child process
+            pid_t pid = fork();
+            if (pid == -1) {
+                perror("fork");
+                exit(EXIT_FAILURE);
+            }
+            
+            if (pid == 0) {
+                // child process: counts words in one file
+                // close the read end of the pipe (child only writes)
+                close(pipefd[0]);
+                
+                // open the file assigned to this child
+                FILE *fp = fopen(argv[i], "r");
+                if (fp == NULL) {
+                    perror("could not open file");
+                    exit(EXIT_FAILURE);
+                }
+                
+                // count words in this file
+                word_count_list_t child_counts;
+                init_words(&child_counts);
+                count_words(&child_counts, fp);
+                fclose(fp);
+                
+                // write the word counts to the pipe
+                FILE *pipe_stream = fdopen(pipefd[1], "w");
+                fprint_words(&child_counts, pipe_stream);
+                fclose(pipe_stream); // also closes pipefd[1]
+                
+                // exit child process
+                exit(EXIT_SUCCESS);
+                
+            } else {
+                // parent process: collects results from child
+                
+                // close the write end of the pipe
+                close(pipefd[1]);
+                
+                // convert the pipe's read end into a FILE* stream.
+                FILE *pipe_stream = fdopen(pipefd[0], "r");
+                merge_counts(&word_counts, pipe_stream);
+                fclose(pipe_stream);  // also closes pipefd[0]
+                
+                // wait for child to finish, don't care about exit status
+                wait(NULL);
+            }
+        }
     }
 
     /* Output final result of all process' work. */
