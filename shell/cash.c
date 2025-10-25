@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <limits.h>
+#include <sys/wait.h>
 
 #include "command.h"
 
@@ -16,14 +19,99 @@ static void print_usage(void) {
     printf("\n");
     printf("Built-in commands:\n");
     printf("help: Print out this usage information.\n");
-    /* If you wish, you can add a summary of each built-in you implement. */
+    printf("exit <code>: Exit the shell with the specified exit code.\n");
+    printf("cd <directory>: Change the current working directory.\n");
+    printf("pwd: Print the current working directory.\n");
     printf("\n");
+}
+
+static void exit_command(const struct command *cmd) {
+    int exit_code = 0;
+    if (command_get_num_tokens(cmd) > 1) {
+        exit_code = atoi(command_get_token_by_index(cmd, 1)); // parse exit code from argument
+    }
+    exit(exit_code); // exit with specified or default code
+}
+
+static void cd_command(const struct command *cmd) {
+    // use provided directory or home directory if none given
+    const char *dir = (command_get_num_tokens(cmd) > 1) ? 
+                      command_get_token_by_index(cmd, 1) : getenv("HOME");
+    if (chdir(dir) != 0) {
+        perror("cd"); // print error if directory change fails
+    }
+}
+
+static void pwd_command(const struct command *cmd) {
+    char cwd[4096]; // reasonable buffer size for current directory
+    if (getcwd(cwd, sizeof(cwd))) {
+        printf("%s\n", cwd); // print current working directory
+    }
+}
+
+// resolve program path and execute
+static void run_program(char *prog, char **argv) {
+    extern char **environ;
+    
+    // if program has '/', use it directly
+    if (strchr(prog, '/')) {
+        execve(prog, argv, environ);
+    } else {
+        // search PATH
+        char *PATH = getenv("PATH");
+        if (PATH) {
+            char prog_path[1000];
+            char *path_dir = strtok(PATH, ":");
+            while (path_dir) {
+                sprintf(prog_path, "%s/%s", path_dir, prog);
+                if (access(prog_path, X_OK) == 0) {
+                    execve(prog_path, argv, environ);
+                }
+                path_dir = strtok(NULL, ":");
+            }
+        }
+    }
+    fprintf(stderr, "cash: %s: command not found\n", prog);
+    exit(EXIT_FAILURE);
+}
+
+static void execute_external_command(const struct command *cmd) {
+    extern char **environ;
+    
+    // build argv array
+    size_t num_tokens = command_get_num_tokens(cmd);
+    char **argv = malloc((num_tokens + 1) * sizeof(char *));
+    for (size_t i = 0; i < num_tokens; i++) {
+        argv[i] = (char *)command_get_token_by_index(cmd, i);
+    }
+    argv[num_tokens] = NULL;
+    
+    pid_t pid = fork();
+    if (pid == 0) {
+        run_program(argv[0], argv);
+    } else if (pid > 0) {
+        wait(NULL);
+    } else {
+        perror("fork");
+    }
+    
+    free(argv);
 }
 
 static bool handle_builtin_command(const struct command *cmd) {
     const char *first_token = command_get_token_by_index(cmd, 0);
+    
     if (strcmp(first_token, "help") == 0) {
         print_usage();
+        return true;
+    } else if (strcmp(first_token, "exit") == 0) {
+        exit_command(cmd);
+        return true;
+    } else if (strcmp(first_token, "cd") == 0) {
+        cd_command(cmd);
+        return true;
+    } else if (strcmp(first_token, "pwd") == 0) {
+        pwd_command(cmd);
         return true;
     } else {
         return false;
@@ -61,7 +149,9 @@ int main(int argc, char **argv) {
     struct command cmd;
     while (prompt_and_read_command(output_stream, input_stream, &cmd)) {
         if (command_get_num_tokens(&cmd) > 0) {
-            handle_builtin_command(&cmd);
+            if (!handle_builtin_command(&cmd)) {
+                execute_external_command(&cmd); // not a built-in command, try to execute as external program
+            }
         }
         command_deallocate(&cmd);
     }
