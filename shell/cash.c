@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #include "command.h"
 
@@ -78,17 +79,60 @@ static void run_program(char *prog, char **argv) {
 static void execute_external_command(const struct command *cmd) {
     extern char **environ;
     
-    // build argv array
     size_t num_tokens = command_get_num_tokens(cmd);
     char **argv = malloc((num_tokens + 1) * sizeof(char *));
+    char *input_file = NULL;
+    char *output_file = NULL;
+    size_t argv_index = 0;
+    
+    // parse tokens to separate command from redirection
     for (size_t i = 0; i < num_tokens; i++) {
-        argv[i] = (char *)command_get_token_by_index(cmd, i);
+        const char *token = command_get_token_by_index(cmd, i);
+        
+        if (strcmp(token, "<") == 0) {
+            // input redirection
+            if (i + 1 < num_tokens) {
+                input_file = (char *)command_get_token_by_index(cmd, i + 1);
+                i++; // skip the filename
+            }
+        } else if (strcmp(token, ">") == 0) {
+            // output redirection
+            if (i + 1 < num_tokens) {
+                output_file = (char *)command_get_token_by_index(cmd, i + 1);
+                i++; // skip the filename
+            }
+        } else {
+            // regular command argument
+            argv[argv_index++] = (char *)token;
+        }
     }
-    argv[num_tokens] = NULL;
+    argv[argv_index] = NULL;
     
     pid_t pid = fork();
     if (pid == 0) {
+        // child process - handle redirection
+        if (input_file) {
+            int fd = open(input_file, O_RDONLY);
+            if (fd < 0) {
+                perror(input_file);
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDIN_FILENO); // duplicates a file descriptor, makes standard input point to file we opened
+            close(fd);
+        }
+        
+        if (output_file) {
+            int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                perror(output_file);
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDOUT_FILENO); // makes standard output point to file we opened
+            close(fd);
+        }
+        
         run_program(argv[0], argv);
+        
     } else if (pid > 0) {
         wait(NULL);
     } else {
