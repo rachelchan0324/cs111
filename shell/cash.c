@@ -13,6 +13,19 @@
 
 bool shell_is_interactive = true;
 
+static void reap_background_jobs(void) {
+    pid_t pid;
+    int status;
+    
+    // check for any completed background jobs without blocking
+    // -1 means any child process, WNOHANG to not block
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (shell_is_interactive) {
+            printf("[%d]: terminated\n", pid);
+        }
+    }
+}
+
 static void setup_signal_handling(void) {
     if (shell_is_interactive) {
         // ignore these signals when interactive
@@ -37,6 +50,7 @@ static void print_usage(void) {
     printf("exit <code>: Exit the shell with the specified exit code.\n");
     printf("cd <directory>: Change the current working directory.\n");
     printf("pwd: Print the current working directory.\n");
+    printf("wait: Wait for all background jobs to complete.\n");
     printf("\n");
 }
 
@@ -107,23 +121,27 @@ static void execute_external_command(const struct command *cmd) {
     char *input_file = NULL;
     char *output_file = NULL;
     size_t argv_index = 0;
+    bool is_background = false;
     
-    // parse tokens to separate command from redirection
+    // parse tokens for redirection and background execution
     for (size_t i = 0; i < num_tokens; i++) {
         const char *token = command_get_token_by_index(cmd, i);
         
         if (strcmp(token, "<") == 0) {
-            // input redirection
+            // input redirection from file
             if (i + 1 < num_tokens) {
                 input_file = (char *)command_get_token_by_index(cmd, i + 1);
-                i++; // skip the filename
+                i++; // skip filename token
             }
         } else if (strcmp(token, ">") == 0) {
-            // output redirection
+            // output redirection to file
             if (i + 1 < num_tokens) {
                 output_file = (char *)command_get_token_by_index(cmd, i + 1);
-                i++; // skip the filename
+                i++; // skip filename token
             }
+        } else if (strcmp(token, "&") == 0) {
+            // run job in background
+            is_background = true;
         } else {
             // regular command argument
             argv[argv_index++] = (char *)token;
@@ -133,36 +151,65 @@ static void execute_external_command(const struct command *cmd) {
     
     pid_t pid = fork();
     if (pid == 0) {
-        // child process - handle redirection
+        // child: put self in new process group
+        setpgid(0, 0);
+        
+        // setup input redirection
         if (input_file) {
             int fd = open(input_file, O_RDONLY);
             if (fd < 0) {
                 perror(input_file);
                 exit(EXIT_FAILURE);
             }
-            dup2(fd, STDIN_FILENO); // duplicates a file descriptor, makes standard input point to file we opened
+            dup2(fd, STDIN_FILENO); // redirect stdin to file
             close(fd);
         }
         
+        // setup output redirection
         if (output_file) {
             int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd < 0) {
                 perror(output_file);
                 exit(EXIT_FAILURE);
             }
-            dup2(fd, STDOUT_FILENO); // makes standard output point to file we opened
+            dup2(fd, STDOUT_FILENO); // redirect stdout to file
             close(fd);
         }
         
         run_program(argv[0], argv);
-
     } else if (pid > 0) {
-        wait(NULL);
+        // parent: ensure child is in its own process group
+        // duplicate of child's setpgid call for race condition safety
+        setpgid(pid, pid);
+        
+        if (!is_background && shell_is_interactive) {
+            // foreground job: give terminal control and wait
+            tcsetpgrp(STDIN_FILENO, pid);
+            wait(NULL);
+            // restore shell's terminal control
+            tcsetpgrp(STDIN_FILENO, getpgrp());
+        } else if (is_background) {
+            // background job: don't wait, shell keeps terminal
+            // (no output required by assignment)
+        } else {
+            // non-interactive: just wait for completion
+            wait(NULL);
+        }
     } else {
         perror("fork");
     }
     
     free(argv);
+}
+
+static void wait_command(const struct command *cmd) {
+    pid_t pid;
+    int status;
+    
+    // wait for all background jobs to complete WITH blocking
+    while ((pid = waitpid(-1, &status, 0)) > 0) {
+        // background job completed
+    }
 }
 
 static bool handle_builtin_command(const struct command *cmd) {
@@ -179,6 +226,9 @@ static bool handle_builtin_command(const struct command *cmd) {
         return true;
     } else if (strcmp(first_token, "pwd") == 0) {
         pwd_command(cmd);
+        return true;
+    } else if (strcmp(first_token, "wait") == 0) {
+        wait_command(cmd);
         return true;
     } else {
         return false;
@@ -216,8 +266,16 @@ int main(int argc, char **argv) {
     // set up signal handling
     setup_signal_handling();
 
+    // put shell in its own process group when interactive; initially controls the terminal
+    if (shell_is_interactive) {
+        setpgid(0, 0);
+    }
+
     struct command cmd;
     while (prompt_and_read_command(output_stream, input_stream, &cmd)) {
+        // reap any completed background jobs before processing next command
+        reap_background_jobs();
+        
         if (command_get_num_tokens(&cmd) > 0) {
             if (!handle_builtin_command(&cmd)) {
                 execute_external_command(&cmd); // not a built-in command, try to execute as external program
