@@ -7,10 +7,24 @@
 #include <limits.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #include "command.h"
 
 bool shell_is_interactive = true;
+
+static void setup_signal_handling(void) {
+    if (shell_is_interactive) {
+        // ignore these signals when interactive
+        signal(SIGINT, SIG_IGN);    // Ctrl-C
+        signal(SIGQUIT, SIG_IGN);   // Ctrl-'\'
+        signal(SIGTERM, SIG_IGN);   // termination request
+        signal(SIGTSTP, SIG_IGN);   // Ctrl-Z (suspend)
+        signal(SIGCONT, SIG_IGN);   // continue after suspend
+        signal(SIGTTIN, SIG_IGN);   // background read from terminal
+        signal(SIGTTOU, SIG_IGN);   // background write to terminal
+    }
+}
 
 static void print_usage(void) {
     printf(u8"\U0001F309 \U0001F30A \U00002600\U0000FE0F "
@@ -53,6 +67,15 @@ static void pwd_command(const struct command *cmd) {
 // resolve program path and execute
 static void run_program(char *prog, char **argv) {
     extern char **environ;
+    
+    // restore default signal handlers for child process
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGTSTP, SIG_DFL);
+    signal(SIGCONT, SIG_DFL);
+    signal(SIGTTIN, SIG_DFL);
+    signal(SIGTTOU, SIG_DFL);
     
     // if program has '/', use it directly
     if (strchr(prog, '/')) {
@@ -132,7 +155,7 @@ static void execute_external_command(const struct command *cmd) {
         }
         
         run_program(argv[0], argv);
-        
+
     } else if (pid > 0) {
         wait(NULL);
     } else {
@@ -181,14 +204,17 @@ int main(int argc, char **argv) {
             perror(argv[1]);
             return EXIT_FAILURE;
         }
-        shell_is_interactive = false;
+        shell_is_interactive = false; // script file provided, not interactive
     }
     if (!isatty(STDIN_FILENO)) {
-        shell_is_interactive = false;
+        shell_is_interactive = false; // stdin is not a terminal (e.g., piped input, redirected)
     }
     if (!shell_is_interactive) {
         output_stream = NULL;
     }
+
+    // set up signal handling
+    setup_signal_handling();
 
     struct command cmd;
     while (prompt_and_read_command(output_stream, input_stream, &cmd)) {
